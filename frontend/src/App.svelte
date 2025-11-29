@@ -21,6 +21,9 @@
   let toolMenuOpen = false;
   let sidebarCollapsed = false;
   let hasBottomInset = false;
+  let messagesContainer = null;
+  let shouldAutoScroll = true;
+  const AUTO_SCROLL_THRESHOLD = 60;
 
   // Derived state
   $: currentConversation =
@@ -552,14 +555,67 @@
     }
   }
 
-  function scrollToBottom() {
-    const container = document.getElementById('messages');
-    if (container) container.scrollTop = container.scrollHeight;
+  function scrollToBottom(force = false) {
+    if (!messagesContainer) {
+      messagesContainer = document.getElementById('messages');
+    }
+    if (!messagesContainer) return;
+    if (force || shouldAutoScroll) {
+      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
   }
 
   function stopStreaming() {
     if (controller) controller.abort();
   }
+
+  onMount(() => {
+    let removeScrollListener = null;
+    let resizeObserver = null;
+    let cancelled = false;
+
+    const setupListeners = async () => {
+      await tick();
+      if (cancelled) return;
+      messagesContainer = document.getElementById('messages');
+      if (!messagesContainer) return;
+
+      const updateAutoScrollFlag = () => {
+        const distanceFromBottom =
+          messagesContainer.scrollHeight -
+          messagesContainer.scrollTop -
+          messagesContainer.clientHeight;
+        shouldAutoScroll = distanceFromBottom <= AUTO_SCROLL_THRESHOLD;
+      };
+
+      messagesContainer.addEventListener('scroll', updateAutoScrollFlag);
+      removeScrollListener = () =>
+        messagesContainer &&
+        messagesContainer.removeEventListener('scroll', updateAutoScrollFlag);
+
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(() => {
+          if (shouldAutoScroll) {
+            scrollToBottom(true);
+          }
+        });
+        resizeObserver.observe(messagesContainer);
+      }
+
+      // Initialize flag so first manual scroll is respected
+      updateAutoScrollFlag();
+    };
+
+    setupListeners();
+
+    return () => {
+      cancelled = true;
+      removeScrollListener && removeScrollListener();
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+    };
+  });
 
   function handleWindowClick(event) {
     if (!toolMenuOpen) return;
