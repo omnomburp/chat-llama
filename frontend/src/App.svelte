@@ -697,6 +697,27 @@
     if (controller) controller.abort();
   }
 
+  function getMessagesContainer() {
+    if (!messagesContainer) {
+      messagesContainer = document.getElementById('messages');
+    }
+    return messagesContainer;
+  }
+
+  function handleChatWrapperWheel(event) {
+    const container = getMessagesContainer();
+    if (!container) return;
+    const target = event.target;
+    const insideMessages =
+      typeof Node !== 'undefined' &&
+      target instanceof Node &&
+      container.contains(target);
+    if (!insideMessages) {
+      event.preventDefault();
+      container.scrollTop += event.deltaY;
+    }
+  }
+
   onMount(() => {
     let removeScrollListener = null;
     let resizeObserver = null;
@@ -808,7 +829,7 @@
     />
 
     <section class="chat-area">
-      <div class="chat-wrapper">
+      <div class="chat-wrapper" on:wheel={handleChatWrapperWheel}>
         <ChatMessages
           {currentConversation}
           {currentMessages}

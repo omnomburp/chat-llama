@@ -5,15 +5,69 @@ if (pdfjsLib.GlobalWorkerOptions) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 }
 
-export const ACCEPTED_FILE_TYPES = [
-  'text/plain',
+const EXTENSIONS = [
   '.txt',
   '.md',
+  '.markdown',
   '.log',
   '.csv',
-  '.json',
   '.tsv',
-  '.text',
+  '.json',
+  '.yaml',
+  '.yml',
+  '.ini',
+  '.conf',
+  '.cfg',
+  '.env',
+  '.env.local',
+  '.gitignore',
+  '.gitattributes',
+  '.py',
+  '.rb',
+  '.js',
+  '.ts',
+  '.tsx',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.css',
+  '.scss',
+  '.less',
+  '.html',
+  '.htm',
+  '.xml',
+  '.c',
+  '.h',
+  '.cpp',
+  '.cc',
+  '.hpp',
+  '.cs',
+  '.java',
+  '.kt',
+  '.swift',
+  '.go',
+  '.rs',
+  '.php',
+  '.sh',
+  '.bash',
+  '.zsh',
+  '.fish',
+  '.ps1',
+  '.bat',
+  '.pl',
+  '.sql',
+  '.r',
+  '.scala',
+  '.erl',
+  '.ex',
+  '.exs',
+  '.dart'
+];
+
+export const ACCEPTED_FILE_TYPES = [
+  'text/plain',
+  'application/json',
+  ...EXTENSIONS,
   'application/pdf',
   '.pdf'
 ].join(',');
@@ -21,7 +75,7 @@ export const ACCEPTED_FILE_TYPES = [
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB
 const MAX_TEXT_LENGTH = 20000;
 
-const textExtensions = ['.txt', '.md', '.log', '.csv', '.json', '.tsv'];
+const textExtensions = EXTENSIONS;
 
 function isPdf(file) {
   return (
