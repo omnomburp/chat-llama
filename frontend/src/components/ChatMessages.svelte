@@ -51,8 +51,20 @@
         <div class={`message ${msg.role === 'user' ? 'user' : 'assistant'}`}>
           <div class="bubble">
             <div class="message-content">
-              {@html renderMarkdown(msg.content)}
+              {@html renderMarkdown(msg.displayContent ?? msg.content)}
             </div>
+            {#if msg.attachmentsMeta && msg.attachmentsMeta.length > 0}
+              <div class="message-attachments">
+                {#each msg.attachmentsMeta as file (file.id ?? file.name)}
+                  <div class="attachment-token">
+                    <span class="file-name">{file.name}</span>
+                    {#if file.sizeLabel}
+                      <span class="file-size">{file.sizeLabel}</span>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
       {/if}
@@ -122,6 +134,29 @@
     overflow: visible;
     width: 100%;
     position: relative;
+  }
+
+  .message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+
+  .attachment-token {
+    border: 1px solid #2f3036;
+    border-radius: 0.65rem;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+    background: rgba(255, 255, 255, 0.04);
+    display: inline-flex;
+    gap: 0.3rem;
+    align-items: baseline;
+  }
+
+  .attachment-token .file-size {
+    color: #9ea0ac;
+    font-size: 0.75rem;
   }
 
   .message.user .bubble {

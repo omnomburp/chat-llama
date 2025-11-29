@@ -246,7 +246,7 @@ async fn duckduckgo_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
 
     let mut results = Vec::new();
 
-    for result in document.select(&result_sel).take(6) {
+    for result in document.select(&result_sel).take(7) {
         let title_el = result.select(&title_sel).next();
         let snippet_el = result.select(&snippet_sel).next();
 
@@ -420,7 +420,9 @@ Rules:
 }
 
 fn parse_planner_json(raw: &str) -> Result<Option<String>, serde_json::Error> {
-    let parsed = serde_json::from_str::<SearchPlannerResponse>(raw)?;
+    let normalized = normalize_planner_output(raw);
+    let candidate = extract_json_object(&normalized).unwrap_or(normalized);
+    let parsed = serde_json::from_str::<SearchPlannerResponse>(&candidate)?;
     if !parsed.use_search {
         Ok(None)
     } else {
@@ -431,6 +433,48 @@ fn parse_planner_json(raw: &str) -> Result<Option<String>, serde_json::Error> {
             Ok(Some(q.to_string()))
         }
     }
+}
+
+fn normalize_planner_output(raw: &str) -> String {
+    let mut cleaned = raw.trim();
+    let prefixes = ["```json", "```JSON", "```"];
+    for prefix in prefixes {
+        if let Some(stripped) = cleaned.strip_prefix(prefix) {
+            cleaned = stripped;
+            break;
+        }
+    }
+    if let Some(stripped) = cleaned.strip_suffix("```") {
+        cleaned = stripped;
+    }
+    cleaned.trim().to_string()
+}
+
+fn extract_json_object(text: &str) -> Option<String> {
+    let mut depth = 0;
+    let mut start_idx = None;
+    for (idx, ch) in text.char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    start_idx = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(start) = start_idx {
+                            return Some(text[start..=idx].to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 async fn retry_planner_parse(

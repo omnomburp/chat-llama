@@ -1,5 +1,6 @@
 <script>
   import { createEventDispatcher } from 'svelte';
+  import { ACCEPTED_FILE_TYPES } from '../lib/fileUtils.js';
 
   export let inputValue = '';
   export let loading = false;
@@ -7,19 +8,80 @@
   export let toolMenuOpen = false;
   export let hasBottomInset = false;
   export let bottomInset = 0;
+  export let attachments = [];
+  export let maxAttachments = 3;
+  export let attachmentError = '';
+  export let attachmentsLoading = false;
 
   const dispatch = createEventDispatcher();
+  let fileInput;
+  let dragCounter = 0;
+  let isDraggingFiles = false;
 
   function handleInput(e) {
     dispatch('input', e.target.value);
   }
+
+  function triggerFileDialog() {
+    if (attachmentsLoading) return;
+    if (fileInput) {
+      fileInput.click();
+    }
+  }
+
+  function handleFileChange(event) {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length) {
+      dispatch('addFiles', files);
+    }
+    event.target.value = '';
+  }
+
+  function handleRemoveAttachment(id) {
+    dispatch('removeAttachment', id);
+  }
+
+  function handleDragEnter(event) {
+    if (!event.dataTransfer) return;
+    dragCounter += 1;
+    if (event.dataTransfer.types?.includes('Files')) {
+      isDraggingFiles = true;
+    }
+  }
+
+  function handleDragLeave(event) {
+    if (!event.dataTransfer) return;
+    dragCounter = Math.max(dragCounter - 1, 0);
+    if (dragCounter === 0) {
+      isDraggingFiles = false;
+    }
+  }
+
+  function handleDrop(event) {
+    if (!event.dataTransfer) return;
+    const files = Array.from(event.dataTransfer.files ?? []);
+    isDraggingFiles = false;
+    dragCounter = 0;
+    if (files.length) {
+      dispatch('addFiles', files);
+    }
+  }
 </script>
 
 <form
-  class={`input-bar ${hasBottomInset ? 'with-inset' : ''}`}
+  class={`input-bar ${hasBottomInset ? 'with-inset' : ''} ${isDraggingFiles ? 'drag-active' : ''}`}
   style={`--bottom-inset: ${Math.min(Math.max(bottomInset, 0), 200)}px;`}
   on:submit|preventDefault={() => dispatch('send')}
+  on:dragenter|preventDefault={handleDragEnter}
+  on:dragover|preventDefault
+  on:dragleave|preventDefault={handleDragLeave}
+  on:drop|preventDefault={handleDrop}
 >
+  {#if isDraggingFiles}
+    <div class="drag-overlay" aria-hidden="true">
+      Drop files to attach
+    </div>
+  {/if}
   <div class="input-inner">
     <div class="tool-menu">
       <button
@@ -45,13 +107,36 @@
             <span class="tool-check">✓</span>
           {/if}
         </button>
-        <div class="tool-item disabled" aria-disabled="true">
+        <button
+          type="button"
+          class={`tool-item ${attachments.length >= maxAttachments ? 'disabled' : ''}`}
+          disabled={attachments.length >= maxAttachments || attachmentsLoading}
+          on:click={() => {
+            triggerFileDialog();
+            dispatch('toggleMenu', false);
+          }}
+        >
           <span>Add files</span>
-        </div>
+          <span class="tool-check">
+            {#if attachmentsLoading}
+              …
+            {:else}
+              {attachments.length}/{maxAttachments}
+            {/if}
+          </span>
+        </button>
         <div class="tool-item disabled" aria-disabled="true">
           <span>Add images</span>
         </div>
       </div>
+      <input
+        type="file"
+        accept={ACCEPTED_FILE_TYPES}
+        multiple
+        class="file-input"
+        bind:this={fileInput}
+        on:change={handleFileChange}
+      />
     </div>
 
     {#if currentUseSearch}
@@ -69,6 +154,33 @@
       </div>
     {/if}
 
+    {#if attachments.length}
+      <div class="attachment-preview">
+        {#each attachments as file (file.id)}
+          <div class="attachment-chip">
+            <div class="chip-text">
+              <span class="chip-name">{file.name}</span>
+              {#if file.sizeLabel}
+                <span class="chip-size">{file.sizeLabel}</span>
+              {/if}
+            </div>
+            <button
+              type="button"
+              class="chip-remove"
+              aria-label={`Remove ${file.name}`}
+              on:click={() => handleRemoveAttachment(file.id)}
+            >
+              ✕
+            </button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    {#if attachmentError}
+      <div class="attachment-error" aria-live="polite">{attachmentError}</div>
+    {/if}
+
     <textarea
       rows="1"
       bind:value={inputValue}
@@ -81,7 +193,11 @@
         }
       }}
     />
-    <button class="send-button" type="submit" disabled={loading || !inputValue.trim()}>
+    <button
+      class="send-button"
+      type="submit"
+      disabled={loading || (!inputValue.trim() && attachments.length === 0)}
+    >
       {#if loading}
         ...
       {:else}
@@ -99,6 +215,8 @@
     bottom: var(--bottom-inset, 0px);
     padding-bottom: calc(env(safe-area-inset-bottom, 0.3rem) + var(--bottom-inset, 0px));
     background: linear-gradient(to top, #111214 60%, rgba(17, 18, 20, 0));
+    z-index: 2;
+    overflow: visible;
   }
 
   .input-bar.with-inset {
@@ -107,6 +225,7 @@
 
   .input-inner {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.6rem;
     border-radius: 1.1rem;
@@ -115,8 +234,29 @@
     background: #18191d;
   }
 
+  .input-bar.drag-active .input-inner {
+    border-color: rgba(154, 182, 255, 0.65);
+    box-shadow: 0 0 0 1px rgba(154, 182, 255, 0.35);
+    background: rgba(24, 25, 29, 0.92);
+  }
+
+  .drag-overlay {
+    position: absolute;
+    inset: 0;
+    border-radius: 1.2rem;
+    border: 1px dashed rgba(154, 182, 255, 0.5);
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    color: #d5ddff;
+    background: rgba(17, 18, 20, 0.65);
+  }
+
   .input-inner textarea {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 180px;
     resize: none;
     border: none;
     background: transparent;
@@ -147,6 +287,10 @@
 
   .tool-menu {
     position: relative;
+  }
+
+  .file-input {
+    display: none;
   }
 
   .tool-trigger {
@@ -223,6 +367,56 @@
 
   .tool-check {
     font-size: 0.8rem;
+  }
+
+  .attachment-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .attachment-chip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid #2f3036;
+    border-radius: 0.7rem;
+    padding: 0.35rem 0.55rem;
+    background: rgba(255, 255, 255, 0.03);
+    gap: 0.4rem;
+  }
+
+  .chip-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+  }
+
+  .chip-name {
+    font-size: 0.85rem;
+  }
+
+  .chip-size {
+    font-size: 0.75rem;
+    color: #9ea0ac;
+  }
+
+  .chip-remove {
+    border: none;
+    background: transparent;
+    color: #c9cad3;
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0.1rem;
+  }
+
+  .attachment-error {
+    width: 100%;
+    flex: 1 1 100%;
+    font-size: 0.78rem;
+    color: #f87171;
   }
 
   .tool-pill {

@@ -6,10 +6,12 @@
   import Sidebar from './components/Sidebar.svelte';
   import ChatMessages from './components/ChatMessages.svelte';
   import Composer from './components/Composer.svelte';
+  import { readAttachment, formatFileSize } from './lib/fileUtils.js';
 
   const STORAGE_KEY = 'llama-chat-conversations';
   const defaultUseSearch = true;
   const SIDEBAR_BREAKPOINT = 900;
+  const MAX_ATTACHMENTS = 3;
 
   let conversations = [];
   let currentId = null;
@@ -25,6 +27,9 @@
   let messagesContainer = null;
   let shouldAutoScroll = true;
   const AUTO_SCROLL_THRESHOLD = 60;
+  let attachments = [];
+  let attachmentError = '';
+  let attachmentsLoading = false;
 
   // Derived state
   $: currentConversation =
@@ -78,6 +83,90 @@
     const adjusted = valid > 8 ? Math.min(valid + 6, 220) : 0;
     bottomInset = adjusted;
     hasBottomInset = adjusted > 0;
+  }
+
+  function generateAttachmentId() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function buildAttachmentPayload(items) {
+    if (!items || items.length === 0) return '';
+    return items
+      .map((item, idx) => {
+        const sizePart = item.sizeLabel ? ` (${item.sizeLabel})` : '';
+        return `[File ${idx + 1}: ${item.name}${sizePart}]\n${item.content}`;
+      })
+      .join('\n\n');
+  }
+
+  async function handleFilesAdded(files) {
+    const incoming = Array.isArray(files)
+      ? files
+      : Array.from(files ?? []);
+    if (incoming.length === 0) return;
+
+    const remainingSlots = MAX_ATTACHMENTS - attachments.length;
+    if (remainingSlots <= 0) {
+      attachmentError = `You can attach up to ${MAX_ATTACHMENTS} files.`;
+      return;
+    }
+
+    attachmentsLoading = true;
+    let slotsLeft = remainingSlots;
+    const nextAttachments = [];
+    let errorMessage = '';
+
+    try {
+      for (const file of incoming) {
+        if (slotsLeft <= 0) {
+          if (!errorMessage) {
+            errorMessage = `You can attach up to ${MAX_ATTACHMENTS} files.`;
+          }
+          break;
+        }
+        try {
+          const parsed = await readAttachment(file);
+          if (!parsed?.text) {
+            if (!errorMessage) {
+              errorMessage = `${file.name} does not contain readable text.`;
+            }
+            continue;
+          }
+          nextAttachments.push({
+            id: generateAttachmentId(),
+            name: file.name,
+            size: file.size,
+            sizeLabel: formatFileSize(file.size),
+            kind: parsed.type,
+            content: parsed.text
+          });
+          slotsLeft -= 1;
+        } catch (err) {
+          console.error('Failed to read attachment', err);
+          if (!errorMessage) {
+            errorMessage = err?.message || `Failed to read ${file.name}.`;
+          }
+        }
+      }
+    } finally {
+      attachmentsLoading = false;
+    }
+
+    if (nextAttachments.length) {
+      attachments = [...attachments, ...nextAttachments];
+    }
+
+    attachmentError = errorMessage;
+  }
+
+  function removeAttachment(id) {
+    attachments = attachments.filter((att) => att.id !== id);
+    if (attachments.length === 0) {
+      attachmentError = '';
+    }
   }
 
   const renderer = new marked.Renderer();
@@ -417,7 +506,10 @@
   });
 
   async function sendMessage() {
-    if (!input.trim() || loading) return;
+    if (loading) return;
+    const baseContent = input.trim();
+    const attachmentPayload = buildAttachmentPayload(attachments);
+    if (!baseContent && !attachmentPayload) return;
     toolMenuOpen = false;
 
     let conv = currentConversation;
@@ -425,9 +517,24 @@
       conv = createNewConversation();
     }
 
+    const attachmentsMeta = attachments.map((item) => ({
+      id: item.id,
+      name: item.name,
+      sizeLabel: item.sizeLabel,
+      kind: item.kind
+    }));
+
+    const combinedContent = attachmentPayload
+      ? baseContent
+        ? `${baseContent}\n\n${attachmentPayload}`
+        : attachmentPayload
+      : baseContent;
+
     const userMsg = {
       role: 'user',
-      content: input.trim()
+      content: combinedContent,
+      displayContent: baseContent,
+      attachmentsMeta
     };
 
     // Update conversation with user message
@@ -437,8 +544,13 @@
       conv.title = userMsg.content.slice(0, 40);
     }
 
-    const historyForRequest = conv.messages.slice(); // includes new user msg
+    const historyForRequest = conv.messages.map((msg) => ({
+      role: msg.role,
+      content: msg.content
+    })); // includes new user msg
     input = '';
+    attachments = [];
+    attachmentError = '';
 
     // Placeholder assistant message to stream into
     const assistantMsg = {
@@ -711,10 +823,16 @@
           toolMenuOpen={toolMenuOpen}
           hasBottomInset={hasBottomInset}
           bottomInset={bottomInset}
+          {attachments}
+          maxAttachments={MAX_ATTACHMENTS}
+          attachmentError={attachmentError}
+          attachmentsLoading={attachmentsLoading}
           on:input={(event) => (input = event.detail)}
           on:send={sendMessage}
           on:toggleSearch={(event) => toggleUseSearch(event.detail)}
           on:toggleMenu={(event) => (toolMenuOpen = event.detail)}
+          on:addFiles={(event) => handleFilesAdded(event.detail)}
+          on:removeAttachment={(event) => removeAttachment(event.detail)}
         />
       </div>
 </section>
