@@ -6,6 +6,7 @@
   export let currentUseSearch = true;
   export let toolMenuOpen = false;
   export let hasBottomInset = false;
+  export let bottomInset = 0;
 
   const dispatch = createEventDispatcher();
 
@@ -16,6 +17,7 @@
 
 <form
   class={`input-bar ${hasBottomInset ? 'with-inset' : ''}`}
+  style={`--bottom-inset: ${Math.min(Math.max(bottomInset, 0), 200)}px;`}
   on:submit|preventDefault={() => dispatch('send')}
 >
   <div class="input-inner">
@@ -94,13 +96,13 @@
   .input-bar {
     margin-top: 0.9rem;
     position: sticky;
-    bottom: 0;
-    padding-bottom: env(safe-area-inset-bottom, 0.3rem);
+    bottom: var(--bottom-inset, 0px);
+    padding-bottom: calc(env(safe-area-inset-bottom, 0.3rem) + var(--bottom-inset, 0px));
     background: linear-gradient(to top, #111214 60%, rgba(17, 18, 20, 0));
   }
 
   .input-bar.with-inset {
-    padding-bottom: calc(env(safe-area-inset-bottom, 0.3rem) + 1.5rem);
+    padding-bottom: calc(env(safe-area-inset-bottom, 0.3rem) + var(--bottom-inset, 0px) + 1.5rem);
   }
 
   .input-inner {

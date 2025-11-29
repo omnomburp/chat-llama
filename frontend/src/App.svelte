@@ -21,6 +21,7 @@
   let toolMenuOpen = false;
   let sidebarCollapsed = false;
   let hasBottomInset = false;
+  let bottomInset = 0;
   let messagesContainer = null;
   let shouldAutoScroll = true;
   const AUTO_SCROLL_THRESHOLD = 60;
@@ -62,6 +63,13 @@
     } catch (e) {
       return '#';
     }
+  }
+
+  function updateBottomInset(diff) {
+    const valid = Math.max(diff || 0, 0);
+    const adjusted = valid > 20 ? Math.min(valid - 10, 200) : 0;
+    bottomInset = adjusted;
+    hasBottomInset = adjusted > 0;
   }
 
   const renderer = new marked.Renderer();
@@ -342,9 +350,9 @@
         const visualViewport = window.visualViewport;
         if (visualViewport) {
           const heightDiff = window.innerHeight - visualViewport.height;
-          hasBottomInset = heightDiff > 20;
+          updateBottomInset(heightDiff);
         } else {
-          hasBottomInset = !!doc && doc.scrollHeight > window.innerHeight;
+          updateBottomInset(0);
         }
       }
     };
@@ -356,7 +364,7 @@
       if (window.visualViewport) {
         const updateInset = () => {
           const heightDiff = window.innerHeight - window.visualViewport.height;
-          hasBottomInset = heightDiff > 20;
+          updateBottomInset(heightDiff);
         };
         window.visualViewport.addEventListener('resize', updateInset);
         window.visualViewport.addEventListener('scroll', updateInset);
@@ -697,6 +705,7 @@
           currentUseSearch={currentUseSearch}
           toolMenuOpen={toolMenuOpen}
           hasBottomInset={hasBottomInset}
+          bottomInset={bottomInset}
           on:input={(event) => (input = event.detail)}
           on:send={sendMessage}
           on:toggleSearch={(event) => toggleUseSearch(event.detail)}
