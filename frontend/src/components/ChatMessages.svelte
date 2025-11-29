@@ -185,7 +185,10 @@
       "Liberation Mono", "Courier New", monospace;
     font-size: 0.85rem;
     overflow-x: auto;
-    white-space: pre;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 
   :global(.code-block code) {

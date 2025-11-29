@@ -62,6 +62,12 @@
   }
 
   const renderer = new marked.Renderer();
+  function renderImageToken(token) {
+    const src = sanitizeUrl(token?.href || token?.src);
+    const alt = escapeHtml(token?.text ?? token?.tokens?.map((t) => t.raw ?? '').join('') ?? '');
+    const title = token?.title ? ` title="${escapeHtml(token.title)}"` : '';
+    return `<img src="${src}" alt="${alt}"${title} loading="lazy" />`;
+  }
   renderer.code = function ({ text = '', lang = '' }) {
     const language = typeof lang === 'string' ? lang.trim() : '';
     const cls = language ? `language-${language}` : '';
@@ -78,13 +84,29 @@
   renderer.link = function ({ href, title, tokens }) {
     const safeHref = sanitizeUrl(href);
     const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
-    const inner =
-      (this.parser && this.parser.parseInline(tokens ?? [])) ||
-      escapeHtml(typeof href === 'string' ? href : String(href ?? ''));
+    let inner = '';
+
+    if (tokens && tokens.length === 1 && tokens[0].type === 'image') {
+      inner = renderImageToken(tokens[0]);
+    } else {
+      inner =
+        (this.parser && this.parser.parseInline(tokens ?? [])) ||
+        escapeHtml(typeof href === 'string' ? href : String(href ?? ''));
+    }
+
     return `<a href="${safeHref}" target="_blank" rel="noreferrer"${titleAttr}>${inner}</a>`;
+  };
+  renderer.image = function ({ href, title, text }) {
+    return renderImageToken({ href, title, text });
   };
   renderer.html = function ({ text = '' }) {
     const html = typeof text === 'string' ? text : text !== undefined && text !== null ? String(text) : '';
+    const trimmed = html.trim();
+    const badgePattern =
+      /^<a\s+href="[^"]+"\s+target="_blank"\s+rel="noreferrer">\s*<img\s+src="[^"]+"\s+alt="[^"]*"\s+loading="lazy"\s*\/>\s*<\/a>$/i;
+    if (badgePattern.test(trimmed)) {
+      return trimmed;
+    }
     return escapeHtml(html);
   };
 
@@ -178,23 +200,65 @@
     breaks: true,
     headerIds: false,
     mangle: false,
-    extensions: mathExtensions
+    extensions: mathExtensions,
+    async: false
   });
 
-  function renderMarkdown(text) {
-    if (!text) return '';
-    try {
-      const rendered = marked.parse(text);
-      if (rendered instanceof Promise) {
-        console.warn('Unexpected async markdown render; falling back to plain text.');
-        return escapeHtml(text).replace(/\n/g, '<br>');
+  function applySourceLinks(text, sources) {
+    if (!text || !Array.isArray(sources) || sources.length === 0) {
+      return text;
+    }
+
+    const replaceWithLink = (match, numStr) => {
+      const idx = parseInt(numStr, 10) - 1;
+      if (Number.isNaN(idx) || idx < 0 || idx >= sources.length) {
+        return match;
       }
-      return rendered;
+      const source = sources[idx];
+      if (!source?.url) return match;
+      const safeHref = sanitizeUrl(source.url);
+      const label = `link &#91;${numStr}&#93;`;
+      return `[${label}](${safeHref})`;
+    };
+
+    let updated = text.replace(/\[link\s*\[(\d+)\]\]/gi, replaceWithLink);
+    updated = updated.replace(/link\s*\[(\d+)\]/gi, (match, num) => {
+      return replaceWithLink(match, num);
+    });
+
+    return updated;
+  }
+
+  function replaceBadgeLinks(text) {
+    if (!text) return text;
+    return text.replace(
+      /\[!\[([^\]]*?)\]\(([^)]+?)\)\]\(([^)]+?)\)/g,
+      (_, alt, imgUrl, href) => {
+        const safeHref = sanitizeUrl(href);
+        const safeImg = sanitizeUrl(imgUrl);
+        const safeAlt = escapeHtml(alt ?? "");
+        return `<a href="${safeHref}" target="_blank" rel="noreferrer"><img src="${safeImg}" alt="${safeAlt}" loading="lazy" /></a>`;
+      },
+    );
+  }
+
+  function renderMarkdown(text, sources = []) {
+    if (!text) return '';
+    const textWithLinks = applySourceLinks(text, sources);
+    const badgeApplied = replaceBadgeLinks(textWithLinks);
+    try {
+      const rendered = marked.parse(badgeApplied);
+      if (typeof rendered === 'string') {
+        return rendered;
+      }
+      console.warn('Unexpected non-string markdown render; falling back to plain text.');
+      return escapeHtml(badgeApplied).replace(/\n/g, '<br>');
     } catch (e) {
-      console.error('Failed to render markdown', e, text);
-      return escapeHtml(text).replace(/\n/g, '<br>');
+      console.error('Failed to render markdown', e, badgeApplied);
+      return escapeHtml(badgeApplied).replace(/\n/g, '<br>');
     }
   }
+  $: renderMarkdownWithSources = (text) => renderMarkdown(text, currentSources);
 
   function saveConversations() {
     try {
@@ -564,7 +628,7 @@
         <ChatMessages
           {currentConversation}
           {currentMessages}
-          {renderMarkdown}
+          renderMarkdown={renderMarkdownWithSources}
           loading={loading && showLoadingBubble}
         />
 

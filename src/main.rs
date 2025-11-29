@@ -405,20 +405,88 @@ Rules:
         .map(|c| c.message.content.clone())
         .unwrap_or_default();
 
-    // Try to parse the JSON the model returned
-    if let Ok(parsed) = serde_json::from_str::<SearchPlannerResponse>(&content) {
-        if !parsed.use_search {
+    match parse_planner_json(&content) {
+        Ok(result) => return Ok(result),
+        Err(_) => {
+            eprintln!("plan_search: failed to parse planner JSON: {content}");
+        }
+    }
+
+    if let Some(result) = retry_planner_parse(state, &content).await? {
+        return Ok(Some(result));
+    }
+
+    Ok(None) // fall back to no search if planner response is bad
+}
+
+fn parse_planner_json(raw: &str) -> Result<Option<String>, serde_json::Error> {
+    let parsed = serde_json::from_str::<SearchPlannerResponse>(raw)?;
+    if !parsed.use_search {
+        Ok(None)
+    } else {
+        let q = parsed.query.trim();
+        if q.is_empty() {
             Ok(None)
         } else {
-            let q = parsed.query.trim();
-            if q.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(q.to_string()))
-            }
+            Ok(Some(q.to_string()))
         }
-    } else {
-        eprintln!("plan_search: failed to parse planner JSON: {content}");
-        Ok(None) // fall back to no search if planner response is bad
+    }
+}
+
+async fn retry_planner_parse(
+    state: &AppState,
+    planner_output: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut messages = Vec::<ChatMessage>::new();
+    messages.push(ChatMessage {
+        role: "system".into(),
+        content: r#"You fix invalid JSON from a search planner.
+Return ONLY valid JSON matching: {"use_search": bool, "query": "optional string"}.
+If the planner text implies search is required, set use_search true and craft a short query.
+If no search is needed, return {"use_search": false}."#
+            .into(),
+    });
+
+    messages.push(ChatMessage {
+        role: "user".into(),
+        content: format!(
+            "Planner output:\n\n{}\n\nReturn corrected JSON only.",
+            planner_output
+        ),
+    });
+
+    let llama_req = LlamaChatRequest {
+        model: state.llama_model.clone(),
+        messages,
+        stream: false,
+    };
+
+    let url = format!("{}/v1/chat/completions", state.llama_base_url);
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .bearer_auth("no-key")
+        .json(&llama_req)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let llama_resp: LlamaChatResponse = resp.json().await?;
+    let fallback_content = llama_resp
+        .choices
+        .get(0)
+        .map(|c| c.message.content.clone())
+        .unwrap_or_default();
+
+    match parse_planner_json(&fallback_content) {
+        Ok(result) => Ok(result),
+        Err(_) => {
+            eprintln!(
+                "retry_planner_parse: failed to parse cleaned planner response: {fallback_content}"
+            );
+            Ok(None)
+        }
     }
 }
