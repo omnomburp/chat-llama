@@ -574,6 +574,10 @@
 </main>
 
 <style>
+  :global(*) {
+    box-sizing: border-box;
+  }
+
   :global(body) {
     margin: 0;
     background: #111214;
@@ -679,10 +683,9 @@
 
   .chat-wrapper {
     flex: 1;
-    width: 100%;
-    max-width: 960px;
+    width: min(100%, 960px);
     margin: 0 auto;
-    padding: 1rem 1.5rem;
+    padding: 1rem clamp(1rem, 4vw, 1.5rem);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -705,8 +708,12 @@
       display: none;
     }
 
+    .chat-area {
+      padding: 0 0.5rem;
+    }
+
     .chat-wrapper {
-      padding: 0.75rem;
+      padding: 0.75rem 0.5rem;
     }
   }
 
@@ -723,6 +730,14 @@
 
     .top-controls {
       gap: 0.5rem;
+    }
+
+    .chat-area {
+      padding: 0 0.35rem;
+    }
+
+    .chat-wrapper {
+      padding: 0.75rem 0.35rem;
     }
   }
 </style>
