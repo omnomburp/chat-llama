@@ -65,9 +65,17 @@
     }
   }
 
+  function getViewportBottomOcclusion() {
+    if (typeof window === 'undefined') return 0;
+    const vv = window.visualViewport;
+    if (!vv) return 0;
+    const occluded = window.innerHeight - (vv.height + vv.offsetTop);
+    return Math.max(occluded, 0);
+  }
+
   function updateBottomInset(diff) {
     const valid = Math.max(diff || 0, 0);
-    const adjusted = valid > 20 ? Math.min(valid - 10, 200) : 0;
+    const adjusted = valid > 8 ? Math.min(valid + 6, 220) : 0;
     bottomInset = adjusted;
     hasBottomInset = adjusted > 0;
   }
@@ -346,11 +354,9 @@
         sidebarCollapsed = false;
       }
       if (typeof window !== 'undefined') {
-        const doc = window.document?.documentElement;
         const visualViewport = window.visualViewport;
         if (visualViewport) {
-          const heightDiff = window.innerHeight - visualViewport.height;
-          updateBottomInset(heightDiff);
+          updateBottomInset(getViewportBottomOcclusion());
         } else {
           updateBottomInset(0);
         }
@@ -363,8 +369,7 @@
       window.addEventListener('resize', handleResize);
       if (window.visualViewport) {
         const updateInset = () => {
-          const heightDiff = window.innerHeight - window.visualViewport.height;
-          updateBottomInset(heightDiff);
+          updateBottomInset(getViewportBottomOcclusion());
         };
         window.visualViewport.addEventListener('resize', updateInset);
         window.visualViewport.addEventListener('scroll', updateInset);
