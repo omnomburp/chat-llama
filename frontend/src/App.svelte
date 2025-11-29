@@ -76,9 +76,8 @@
     const cls = language ? `language-${language}` : '';
     const safeCode =
       typeof text === 'string' ? text : text !== undefined && text !== null ? String(text) : '';
-    return `<pre class="code-block"><code class="${cls}">${escapeHtml(
-      safeCode.trimEnd()
-    )}</code></pre>`;
+    const codeContent = escapeHtml(safeCode.trimEnd());
+    return `<div class="code-block"><button class="copy-btn" type="button">Copy</button><pre><code class="${cls}">${codeContent}</code></pre></div>`;
   };
   renderer.codespan = function ({ text = '' }) {
     const code = typeof text === 'string' ? text : text !== undefined && text !== null ? String(text) : '';

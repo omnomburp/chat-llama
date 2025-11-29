@@ -3,9 +3,41 @@
   export let currentMessages = [];
   export let renderMarkdown = (text) => text ?? '';
   export let loading = false;
+
+  function handleCopyClick(event) {
+    const btn = event.target.closest('.copy-btn');
+    if (!btn) return;
+    const code = btn.parentElement?.querySelector('code');
+    if (!code) return;
+    const text = code.innerText;
+    if (!text) return;
+
+    const original = btn.textContent;
+    const resetLabel = () => {
+      btn.textContent = original;
+    };
+
+    btn.textContent = 'Copied!';
+    setTimeout(resetLabel, 1500);
+
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(resetLabel);
+    } else {
+      // Fallback for environments without Clipboard API
+      const tmp = document.createElement('textarea');
+      tmp.value = text;
+      document.body.appendChild(tmp);
+      tmp.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(tmp);
+      }
+    }
+  }
 </script>
 
-<div id="messages" class="messages">
+<div id="messages" class="messages" on:click={handleCopyClick}>
   {#if !currentConversation || currentMessages.length === 0}
     <div class="empty-state">
       <h1>How can I help you today?</h1>
@@ -45,12 +77,12 @@
     overflow-y: auto;
     padding: 1rem;
     border-radius: 1.1rem;
-    background: #1a1b1f;
-    border: 1px solid #2a2b31;
+    background: transparent;
+    border: none;
     display: flex;
     flex-direction: column;
     gap: 0.9rem;
-    box-shadow: 0 15px 55px rgba(5, 5, 6, 0.55);
+    box-shadow: none;
   }
 
   .empty-state {
@@ -76,23 +108,35 @@
 
   .message.assistant {
     justify-content: flex-start;
+    width: 100%;
   }
 
   .bubble {
     border-radius: 1rem;
-    padding: 0.65rem 0.95rem;
+    padding: 0;
     font-size: 0.95rem;
     line-height: 1.45;
-    max-width: min(100%, 680px);
-    background: #212226;
-    border: 1px solid #2f3036;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    overflow: visible;
+    width: 100%;
+    position: relative;
   }
 
   .message.user .bubble {
     background: #f5f5f6;
     color: #121215;
     border-color: #d1d5db;
+    max-width: min(100%, 680px);
+    width: auto;
+    border: 1px solid #d1d5db;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+    padding: 0.65rem 0.95rem;
+  }
+
+  .message.assistant .bubble {
+    padding: 0;
   }
 
   .message-content {
@@ -101,6 +145,13 @@
     word-break: break-word;
     overflow-wrap: anywhere;
     font-family: inherit;
+    max-width: 100%;
+  }
+
+  .message-content :global(img) {
+    max-width: 100%;
+    height: auto;
+    display: block;
   }
 
   .message-content :global(p) {
@@ -175,25 +226,64 @@
     white-space: pre-wrap;
   }
 
-  .code-block {
+  .message-content :global(.code-block) {
     margin: 0.5rem 0;
-    padding: 0.6rem 0.8rem;
+    padding: 0.85rem 0.95rem 0.75rem;
     border-radius: 0.6rem;
     background: #111215;
     border: 1px solid #2b2c31;
+    font-size: 0.85rem;
+    box-sizing: border-box;
+    position: relative;
+  }
+
+  .message-content :global(.code-block pre) {
+    margin: 0.4rem 0 0;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
       "Liberation Mono", "Courier New", monospace;
     font-size: 0.85rem;
-    overflow-x: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
+    overflow: auto;
+    white-space: pre;
+    width: 100%;
     max-width: 100%;
-    box-sizing: border-box;
   }
 
-  :global(.code-block code) {
+  .message-content :global(.code-block code) {
     display: block;
   }
+
+  .message-content :global(.code-block .copy-btn) {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.55rem;
+    background: #1f1f23;
+    color: #e9e9ee;
+    border: 1px solid #2f3036;
+    border-radius: 0.45rem;
+    padding: 0.18rem 0.6rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .message-content :global(.code-block .copy-btn:hover) {
+    background: #2a2b31;
+    border-color: #3a3b42;
+  }
+
+  .message-content :global(table) {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+  }
+
+  .message-content :global(th),
+  .message-content :global(td) {
+    border: 1px solid #2f3036;
+    padding: 0.35rem 0.45rem;
+  }
+
 
   .inline-code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
