@@ -106,6 +106,10 @@
     const trimmed = html.trim();
     const badgePattern =
       /^<a\s+href="[^"]+"\s+target="_blank"\s+rel="noreferrer">\s*<img\s+src="[^"]+"\s+alt="[^"]*"\s+loading="lazy"\s*\/>\s*<\/a>$/i;
+    const breakPattern = /^<br\s*\/?>$/i;
+    if (breakPattern.test(trimmed)) {
+      return '<br />';
+    }
     if (badgePattern.test(trimmed)) {
       return trimmed;
     }

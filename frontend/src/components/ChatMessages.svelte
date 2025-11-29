@@ -125,14 +125,14 @@
   }
 
   .message.user .bubble {
-    background: #f5f5f6;
-    color: #121215;
-    border-color: #d1d5db;
+    background: #232428;
+    color: #f1f1f3;
+    border-color: #2c2d32;
     max-width: min(100%, 680px);
     width: auto;
-    border: 1px solid #d1d5db;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
-    padding: 0.65rem 0.95rem;
+    border: 1px solid #2c2d32;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    padding: 0.6rem 1rem;
   }
 
   .message.assistant .bubble {

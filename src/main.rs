@@ -246,7 +246,7 @@ async fn duckduckgo_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
 
     let mut results = Vec::new();
 
-    for result in document.select(&result_sel).take(5) {
+    for result in document.select(&result_sel).take(6) {
         let title_el = result.select(&title_sel).next();
         let snippet_el = result.select(&snippet_sel).next();
 
