@@ -20,6 +20,7 @@
   let sidebarOpen = false;
   let toolMenuOpen = false;
   let sidebarCollapsed = false;
+  let hasBottomInset = false;
 
   // Derived state
   $: currentConversation =
@@ -266,11 +267,34 @@
       } else {
         sidebarCollapsed = false;
       }
+      if (typeof window !== 'undefined') {
+        const doc = window.document?.documentElement;
+        const visualViewport = window.visualViewport;
+        if (visualViewport) {
+          const heightDiff = window.innerHeight - visualViewport.height;
+          hasBottomInset = heightDiff > 20;
+        } else {
+          hasBottomInset = !!doc && doc.scrollHeight > window.innerHeight;
+        }
+      }
     };
 
+    let vvRemove;
     if (typeof window !== 'undefined') {
       handleResize();
       window.addEventListener('resize', handleResize);
+      if (window.visualViewport) {
+        const updateInset = () => {
+          const heightDiff = window.innerHeight - window.visualViewport.height;
+          hasBottomInset = heightDiff > 20;
+        };
+        window.visualViewport.addEventListener('resize', updateInset);
+        window.visualViewport.addEventListener('scroll', updateInset);
+        vvRemove = () => {
+          window.visualViewport.removeEventListener('resize', updateInset);
+          window.visualViewport.removeEventListener('scroll', updateInset);
+        };
+      }
     }
 
     try {
@@ -291,6 +315,7 @@
           return () => {
             if (typeof window !== 'undefined') {
               window.removeEventListener('resize', handleResize);
+              vvRemove && vvRemove();
             }
           };
         }
@@ -303,6 +328,7 @@
     return () => {
       if (typeof window !== 'undefined') {
         window.removeEventListener('resize', handleResize);
+        vvRemove && vvRemove();
       }
     };
   });
@@ -547,13 +573,14 @@
           {loading}
           currentUseSearch={currentUseSearch}
           toolMenuOpen={toolMenuOpen}
+          hasBottomInset={hasBottomInset}
           on:input={(event) => (input = event.detail)}
           on:send={sendMessage}
           on:toggleSearch={(event) => toggleUseSearch(event.detail)}
           on:toggleMenu={(event) => (toolMenuOpen = event.detail)}
         />
       </div>
-    </section>
+</section>
   </div>
 
   {#if sidebarOpen}

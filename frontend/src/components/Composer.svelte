@@ -5,6 +5,7 @@
   export let loading = false;
   export let currentUseSearch = true;
   export let toolMenuOpen = false;
+  export let hasBottomInset = false;
 
   const dispatch = createEventDispatcher();
 
@@ -13,7 +14,10 @@
   }
 </script>
 
-<form class="input-bar" on:submit|preventDefault={() => dispatch('send')}>
+<form
+  class={`input-bar ${hasBottomInset ? 'with-inset' : ''}`}
+  on:submit|preventDefault={() => dispatch('send')}
+>
   <div class="input-inner">
     <div class="tool-menu">
       <button
@@ -91,8 +95,12 @@
     margin-top: 0.9rem;
     position: sticky;
     bottom: 0;
-    padding-bottom: 0.3rem;
+    padding-bottom: env(safe-area-inset-bottom, 0.3rem);
     background: linear-gradient(to top, #111214 60%, rgba(17, 18, 20, 0));
+  }
+
+  .input-bar.with-inset {
+    padding-bottom: calc(env(safe-area-inset-bottom, 0.3rem) + 1.5rem);
   }
 
   .input-inner {
