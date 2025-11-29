@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target
+
+# Local environment/config files
+.env
+.env.*
+
+# Node/Vite artifacts (but keep built assets committed)
+/frontend/node_modules
+/frontend/.svelte-kit
+/frontend/.vite
+
+# Editor/OS clutter
+.DS_Store
+.vscode
+Thumbs.db
+*.swp
