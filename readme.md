@@ -1,3 +1,3 @@
 # llama-chat
 
-Completely vibe coded web ui with web search for me to use on my phone and other things.
+Completely vibe coded web ui with web search for me to use on my phone and other things. Requires SearXNG to do web search
