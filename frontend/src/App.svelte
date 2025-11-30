@@ -320,21 +320,32 @@
       return text;
     }
 
-    const replaceWithLink = (match, numStr) => {
+    const makeSourceLink = (numStr, labelHtml) => {
       const idx = parseInt(numStr, 10) - 1;
       if (Number.isNaN(idx) || idx < 0 || idx >= sources.length) {
-        return match;
+        return null;
       }
       const source = sources[idx];
-      if (!source?.url) return match;
+      if (!source?.url) return null;
       const safeHref = sanitizeUrl(source.url);
+      return `[${labelHtml}](${safeHref})`;
+    };
+
+    const replaceWithLink = (match, numStr) => {
       const label = `link &#91;${numStr}&#93;`;
-      return `[${label}](${safeHref})`;
+      return makeSourceLink(numStr, label) ?? match;
     };
 
     let updated = text.replace(/\[link\s*\[(\d+)\]\]/gi, replaceWithLink);
     updated = updated.replace(/link\s*\[(\d+)\]/gi, (match, num) => {
       return replaceWithLink(match, num);
+    });
+
+    updated = updated.replace(/(^|[\s(])\[(\d+)\](?!\()/g, (fullMatch, prefix, numStr) => {
+      const label = `&#91;${numStr}&#93;`;
+      const link = makeSourceLink(numStr, label);
+      if (!link) return fullMatch;
+      return `${prefix}${link}`;
     });
 
     return updated;

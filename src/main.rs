@@ -6,7 +6,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, fmt::Write as _, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tower_http::services::{ServeDir, ServeFile};
 
 // ---------- App state ----------
@@ -33,6 +33,98 @@ impl AppState {
 struct ChatMessage {
     role: String, // "user" | "assistant" | "system"
     content: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct LlamaMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: ToolCallFunctionCall,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ToolCallFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Default, Debug, Clone)]
+struct ToolCallBuilder {
+    id: Option<String>,
+    function_name: Option<String>,
+    arguments: String,
+}
+
+impl ToolCallBuilder {
+    fn merge_delta(&mut self, delta: &serde_json::Value) {
+        if let Some(id) = delta.get("id").and_then(|v| v.as_str()) {
+            if self.id.is_none() {
+                self.id = Some(id.to_string());
+            }
+        }
+        if let Some(function) = delta.get("function") {
+            if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                if self.function_name.is_none() {
+                    self.function_name = Some(name.to_string());
+                }
+            }
+            if let Some(args) = function.get("arguments").and_then(|v| v.as_str()) {
+                self.arguments.push_str(args);
+            }
+        }
+    }
+
+    fn build(self) -> Option<ToolCall> {
+        let id = self.id?;
+        let name = self.function_name?;
+        Some(ToolCall {
+            id,
+            call_type: "function".to_string(),
+            function: ToolCallFunctionCall {
+                name,
+                arguments: self.arguments,
+            },
+        })
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone)]
+struct Tool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: ToolFunction,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone)]
+struct ToolFunction {
+    name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone)]
+#[serde(untagged)]
+enum ToolChoice {
+    Simple(String),
+    Detailed(serde_json::Value),
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,148 +174,224 @@ async fn chat_stream_handler(
     Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,
     (axum::http::StatusCode, String),
 > {
-    let sources = maybe_execute_search(&state, &req, "chat_stream_handler").await;
-    let messages = build_llama_messages(&req, &sources);
-
     #[derive(Serialize)]
     struct LlamaStreamRequest {
         model: String,
-        messages: Vec<ChatMessage>,
+        messages: Vec<LlamaMessage>,
         stream: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<Tool>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_choice: Option<ToolChoice>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parallel_tool_calls: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parse_tool_calls: Option<bool>,
     }
 
-    let llama_req = LlamaStreamRequest {
-        model: state.llama_model.clone(),
-        messages,
-        stream: true, // IMPORTANT: stream from llama-server
+    let search_enabled = req.use_search;
+    let mut messages = build_llama_messages(&req, search_enabled);
+    let tools = if search_enabled {
+        Some(vec![duckduckgo_tool_definition()])
+    } else {
+        None
     };
+    let tool_choice = tools
+        .as_ref()
+        .map(|_| ToolChoice::Simple("auto".to_string()));
 
-    // ---- 3. Send request to llama-server with stream:true ----
-    let url = format!("{}/v1/chat/completions", state.llama_base_url);
+    let llama_model = state.llama_model.clone();
+    let llama_base_url = state.llama_base_url.clone();
     let client = reqwest::Client::new();
 
-    let resp = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .bearer_auth("no-key") // llama-server ignores this
-        .json(&llama_req)
-        .send()
-        .await
-        .map_err(|e| {
-            eprintln!("llama stream send error: {e:?}");
-            (
-                axum::http::StatusCode::BAD_GATEWAY,
-                "LLM streaming error".to_string(),
-            )
-        })?;
-
-    let mut byte_stream = resp.bytes_stream();
-
-    // ---- 4. Build SSE stream we send to the browser ----
-    let sources_json = serde_json::to_string(&sources).unwrap_or_else(|_| "[]".to_string());
-
     let event_stream = async_stream::stream! {
-        // First, send the search sources as a custom "sources" event
-        yield Ok::<Event, Infallible>(Event::default().event("sources").data(sources_json));
+        let mut sources: Vec<SearchResult> = Vec::new();
+        if let Ok(sources_json) = serde_json::to_string(&sources) {
+            yield Ok::<Event, Infallible>(Event::default().event("sources").data(sources_json));
+        }
 
-        let mut buffer = String::new();
+        loop {
+            let llama_req = LlamaStreamRequest {
+                model: llama_model.clone(),
+                messages: messages.clone(),
+                stream: true,
+                tools: tools.clone(),
+                tool_choice: tool_choice.clone(),
+                parallel_tool_calls: None,
+                parse_tool_calls: tools.as_ref().map(|_| true),
+            };
 
-        while let Some(chunk_res) = byte_stream.next().await {
-            match chunk_res {
-                Ok(chunk) => {
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                    // Process complete SSE events from llama (split by blank line)
-                    loop {
-                        if let Some(idx) = buffer.find("\n\n") {
-                            let event_block = buffer[..idx].to_string();
-                            buffer = buffer[idx + 2..].to_string(); // skip "\n\n"
-
-                            // Each block may contain "data: ..." lines
-                            for line in event_block.lines() {
-                                let line = line.trim();
-                                if !line.starts_with("data:") {
-                                    continue;
-                                }
-
-                                let data_str = line.trim_start_matches("data:").trim();
-                                if data_str == "[DONE]" {
-                                    // Llama finished streaming
-                                    return;
-                                }
-
-                                // Parse llama's JSON chunk, extract delta.content
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data_str) {
-                                    if let Some(delta) = json["choices"]
-                                        .get(0)
-                                        .and_then(|c| c.get("delta"))
-                                        .and_then(|d| d.get("content"))
-                                        .and_then(|c| c.as_str())
-                                    {
-                                        // Re-wrap into a simple JSON chunk the frontend expects
-                                        let out_json = serde_json::json!({
-                                            "choices": [{
-                                                "delta": { "content": delta }
-                                            }]
-                                        });
-                                        yield Ok(Event::default().data(out_json.to_string()));
-                                    }
-                                }
-                            }
-                        } else {
-                            break;
-                        }
+            let url = format!("{}/v1/chat/completions", llama_base_url);
+            let resp = match client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .bearer_auth("no-key")
+                .json(&llama_req)
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(ok) => ok,
+                    Err(err) => {
+                        eprintln!("llama response error: {err:?}");
+                        let ev = Event::default()
+                            .event("error")
+                            .data("LLM error (see server logs)");
+                        yield Ok(ev);
+                        return;
                     }
-                }
+                },
                 Err(err) => {
-                    eprintln!("llama chunk error: {err:?}");
-                    // Optionally send an error event and then end
+                    eprintln!("llama stream send error: {err:?}");
                     let ev = Event::default()
                         .event("error")
-                        .data("stream error (see server logs)");
+                        .data("LLM streaming error (see server logs)");
                     yield Ok(ev);
                     return;
                 }
+            };
+
+            let mut byte_stream = resp.bytes_stream();
+            let mut buffer = String::new();
+            let mut tool_builders: Vec<ToolCallBuilder> = Vec::new();
+            let mut saw_tool_calls = false;
+
+            'stream_loop: while let Some(chunk_res) = byte_stream.next().await {
+                match chunk_res {
+                    Ok(chunk) => {
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                        loop {
+                            if let Some(idx) = buffer.find("\n\n") {
+                                let event_block = buffer[..idx].to_string();
+                                buffer = buffer[idx + 2..].to_string();
+
+                                let mut data_payloads = Vec::new();
+                                for line in event_block.lines() {
+                                    let trimmed = line.trim();
+                                    if trimmed.starts_with("data:") {
+                                        data_payloads.push(trimmed.trim_start_matches("data:").trim().to_string());
+                                    }
+                                }
+
+                                for data_str in data_payloads {
+                                    if data_str == "[DONE]" {
+                                        break 'stream_loop;
+                                    }
+
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data_str) {
+                                        if let Some(choice) = json["choices"].get(0) {
+                                            if let Some(delta) = choice.get("delta") {
+                                                if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                                                    saw_tool_calls = true;
+                                                    for tc in tool_calls {
+                                                        let index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                                        if index >= tool_builders.len() {
+                                                            tool_builders.resize_with(index + 1, ToolCallBuilder::default);
+                                                        }
+                                                        tool_builders[index].merge_delta(tc);
+                                                    }
+                                                    continue;
+                                                }
+
+                                                if !saw_tool_calls {
+                                                    if let Some(delta_text) = delta
+                                                        .get("content")
+                                                        .and_then(|c| c.as_str())
+                                                    {
+                                                        if !delta_text.is_empty() {
+                                                            let out_json = serde_json::json!({
+                                                                "choices": [{
+                                                                    "delta": { "content": delta_text }
+                                                                }]
+                                                            });
+                                                            yield Ok(Event::default().data(out_json.to_string()));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("llama chunk error: {err:?}");
+                        let ev = Event::default()
+                            .event("error")
+                            .data("stream error (see server logs)");
+                        yield Ok(ev);
+                        return;
+                    }
+                }
+            }
+
+            if saw_tool_calls {
+                let mut built_calls = Vec::new();
+                for builder in tool_builders {
+                    if let Some(call) = builder.build() {
+                        built_calls.push(call);
+                    }
+                }
+
+                if built_calls.is_empty() {
+                    eprintln!("Tool call indicated but nothing was built");
+                    break;
+                }
+
+                messages.push(LlamaMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    tool_calls: Some(built_calls.clone()),
+                    name: None,
+                    tool_call_id: None,
+                });
+
+                for call in built_calls {
+                    match handle_tool_call(&call).await {
+                        Ok((tool_content, maybe_sources)) => {
+                            if let Some(new_sources) = maybe_sources {
+                                sources = new_sources;
+                                if let Ok(json) = serde_json::to_string(&sources) {
+                                    yield Ok(Event::default().event("sources").data(json));
+                                }
+                            }
+
+                            messages.push(LlamaMessage {
+                                role: "tool".into(),
+                                content: Some(tool_content),
+                                tool_calls: None,
+                                name: Some(call.function.name.clone()),
+                                tool_call_id: Some(call.id.clone()),
+                            });
+                        }
+                        Err(err) => {
+                            eprintln!("Tool execution failed: {err:?}");
+                            let error_payload = serde_json::json!({
+                                "error": format!("tool {name} failed: {err}", name = call.function.name)
+                            });
+                            messages.push(LlamaMessage {
+                                role: "tool".into(),
+                                content: Some(error_payload.to_string()),
+                                tool_calls: None,
+                                name: Some(call.function.name.clone()),
+                                tool_call_id: Some(call.id.clone()),
+                            });
+                        }
+                    }
+                }
+
+                continue;
+            } else {
+                break;
             }
         }
     };
 
     Ok(Sse::new(event_stream).keep_alive(KeepAlive::default()))
-}
-
-async fn maybe_execute_search(
-    state: &AppState,
-    req: &ChatRequest,
-    caller: &str,
-) -> Vec<SearchResult> {
-    if !req.use_search {
-        println!("{caller}: use_search = false");
-        return Vec::new();
-    }
-
-    match plan_search(state, req).await {
-        Ok(Some(search_query)) => {
-            println!("{caller}: planner chose search query = {:?}", search_query);
-            match duckduckgo_search(&search_query).await {
-                Ok(results) => {
-                    println!("{caller}: got {} sources", results.len());
-                    results
-                }
-                Err(e) => {
-                    eprintln!("{caller}: search failed: {e:?}");
-                    Vec::new()
-                }
-            }
-        }
-        Ok(None) => {
-            println!("{caller}: planner chose no search");
-            Vec::new()
-        }
-        Err(e) => {
-            eprintln!("{caller}: plan_search error: {e:?}");
-            Vec::new()
-        }
-    }
 }
 
 async fn duckduckgo_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
@@ -270,325 +438,122 @@ async fn duckduckgo_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
     Ok(results)
 }
 
-// ---------- Non-streaming call to llama-server ----------
-
-fn build_llama_messages(req: &ChatRequest, sources: &[SearchResult]) -> Vec<ChatMessage> {
-    let mut messages = Vec::<ChatMessage>::new();
-
-    let system_prompt = if sources.is_empty() {
-        "You are a helpful AI assistant. Answer as clearly as possible."
-    } else {
-        "You are a helpful AI assistant with access to web search results. \
-         Use the provided snippets as context. If something is unclear, say so."
-    };
-
-    messages.push(ChatMessage {
-        role: "system".into(),
-        content: system_prompt.into(),
-    });
-
-    for m in &req.history {
-        messages.push(m.clone());
-    }
-
-    let mut user_content = String::new();
-
-    if !sources.is_empty() {
-        user_content.push_str("Web search results:\n");
-        for (i, s) in sources.iter().enumerate() {
-            let _ = writeln!(
-                &mut user_content,
-                "[{}] {} — {}\n{}",
-                i + 1,
-                s.title,
-                s.snippet,
-                s.url
-            );
-        }
-        user_content.push_str("\n\nBased on these results, answer the user question:\n");
-    }
-
-    user_content.push_str(&req.message);
-
-    messages.push(ChatMessage {
-        role: "user".into(),
-        content: user_content,
-    });
-
-    messages
-}
-
-#[derive(Serialize)]
-struct LlamaChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    stream: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct LlamaChatResponse {
-    choices: Vec<LlamaChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LlamaChoice {
-    #[serde(default)]
-    message: Option<ChatMessage>,
-    #[serde(default)]
-    delta: Option<LlamaDelta>,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LlamaDelta {
-    #[serde(default)]
-    content: String,
-}
-
-impl LlamaChoice {
-    fn content_text(&self) -> Option<String> {
-        if let Some(msg) = &self.message {
-            let trimmed = msg.content.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-
-        if let Some(delta) = &self.delta {
-            let trimmed = delta.content.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-
-        if let Some(text) = &self.text {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-
-        None
+fn duckduckgo_tool_definition() -> Tool {
+    Tool {
+        tool_type: "function".into(),
+        function: ToolFunction {
+            name: "duckduckgo_search".into(),
+            description: "Searches the web using DuckDuckGo and returns the top results.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Short search query describing what you need to know"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 7,
+                        "description": "Optional maximum number of results to return (default 5)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
     }
 }
 
 #[derive(Deserialize)]
-struct SearchPlannerResponse {
-    use_search: bool,
-    #[serde(default)]
+struct DuckDuckGoToolArgs {
     query: String,
+    #[serde(default)]
+    max_results: Option<usize>,
 }
 
-async fn plan_search(state: &AppState, req: &ChatRequest) -> anyhow::Result<Option<String>> {
-    // Ask the model whether to use search and what query to use.
-    // It must answer with pure JSON: {"use_search": bool, "query": "..."}
-
-    let mut messages = Vec::<ChatMessage>::new();
-
-    messages.push(ChatMessage {
-        role: "system".into(),
-        content: r#"You are a search planner for a web-enabled assistant.
-
-Given the conversation so far and the user's latest message, decide whether web search is needed.
-
-You MUST answer ONLY with a single JSON object, no extra text, in this exact format:
-
-{"use_search": false}
-
-OR
-
-{"use_search": true, "query": "<short search query>"}
-
-Rules:
-- use_search should be true only if recent or factual web info is needed.
-- query should be a concise search query (not the whole conversation).
-- Never include explanations or other text outside the JSON."#
-            .into(),
-    });
-
-    // Include prior messages (without previous search results).
-    for m in &req.history {
-        messages.push(m.clone());
-    }
-
-    // Latest user message
-    messages.push(ChatMessage {
-        role: "user".into(),
-        content: req.message.clone(),
-    });
-
-    let llama_req = LlamaChatRequest {
-        model: state.llama_model.clone(),
-        messages,
-        stream: false,
-    };
-
-    let url = format!("{}/v1/chat/completions", state.llama_base_url);
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .bearer_auth("no-key")
-        .json(&llama_req)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let llama_resp: LlamaChatResponse = resp.json().await?;
-    let content = llama_resp
-        .choices
-        .get(0)
-        .and_then(|c| c.content_text())
-        .unwrap_or_default();
-
-    if content.is_empty() {
-        eprintln!("plan_search: planner returned empty content; skipping search");
-        return Ok(None);
-    }
-
-    match parse_planner_json(&content) {
-        Ok(result) => return Ok(result),
-        Err(_) => {
-            eprintln!("plan_search: failed to parse planner JSON: {content}");
-            if let Some(choice) = llama_resp.choices.get(0) {
-                eprintln!("plan_search: raw planner choice = {choice:?}");
-            } else {
-                eprintln!("plan_search: llama response had no choices");
+async fn handle_tool_call(call: &ToolCall) -> anyhow::Result<(String, Option<Vec<SearchResult>>)> {
+    match call.function.name.as_str() {
+        "duckduckgo_search" => {
+            let args: DuckDuckGoToolArgs = serde_json::from_str(&call.function.arguments)
+                .map_err(|e| anyhow::anyhow!("invalid search args: {e}"))?;
+            let trimmed_query = args.query.trim();
+            if trimmed_query.is_empty() {
+                anyhow::bail!("search query missing");
             }
+            let mut results = duckduckgo_search(trimmed_query).await?;
+            let limit = args.max_results.unwrap_or(5).clamp(1, 7);
+            if results.len() > limit {
+                results.truncate(limit);
+            }
+            let payload = format_search_results_for_tool(&results, trimmed_query);
+            Ok((payload, Some(results)))
+        }
+        other => {
+            anyhow::bail!("unknown tool call: {other}");
         }
     }
-
-    if let Some(result) = retry_planner_parse(state, &content).await? {
-        return Ok(Some(result));
-    }
-
-    Ok(None) // fall back to no search if planner response is bad
 }
 
-fn parse_planner_json(raw: &str) -> Result<Option<String>, serde_json::Error> {
-    let normalized = normalize_planner_output(raw);
-    let candidate = extract_json_object(&normalized).unwrap_or(normalized);
-    let parsed = serde_json::from_str::<SearchPlannerResponse>(&candidate)?;
-    if !parsed.use_search {
-        Ok(None)
+fn format_search_results_for_tool(results: &[SearchResult], query: &str) -> String {
+    let entries: Vec<_> = results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            serde_json::json!({
+                "id": i + 1,
+                "title": r.title,
+                "snippet": r.snippet,
+                "url": r.url,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "query": query,
+        "results": entries,
+        "instructions": "Use the snippets and cite sources like [id] in your response."
+    })
+    .to_string()
+}
+
+// ---------- Non-streaming call to llama-server ----------
+
+fn build_llama_messages(req: &ChatRequest, search_enabled: bool) -> Vec<LlamaMessage> {
+    let mut messages = Vec::<LlamaMessage>::new();
+
+    let system_prompt = if search_enabled {
+        "You are a helpful AI assistant. You can call the duckduckgo_search tool to fetch recent web information.\n\
+Use the tool whenever the user asks for factual data you are unsure about.\n\
+When citing information derived from tool results, refer to them as [n] where n is the result index."
     } else {
-        let q = parsed.query.trim();
-        if q.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(q.to_string()))
-        }
-    }
-}
-
-fn normalize_planner_output(raw: &str) -> String {
-    let mut cleaned = raw.trim();
-    let prefixes = ["```json", "```JSON", "```"];
-    for prefix in prefixes {
-        if let Some(stripped) = cleaned.strip_prefix(prefix) {
-            cleaned = stripped;
-            break;
-        }
-    }
-    if let Some(stripped) = cleaned.strip_suffix("```") {
-        cleaned = stripped;
-    }
-    cleaned.trim().to_string()
-}
-
-fn extract_json_object(text: &str) -> Option<String> {
-    let mut depth = 0;
-    let mut start_idx = None;
-    for (idx, ch) in text.char_indices() {
-        match ch {
-            '{' => {
-                if depth == 0 {
-                    start_idx = Some(idx);
-                }
-                depth += 1;
-            }
-            '}' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 0 {
-                        if let Some(start) = start_idx {
-                            return Some(text[start..=idx].to_string());
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-async fn retry_planner_parse(
-    state: &AppState,
-    planner_output: &str,
-) -> anyhow::Result<Option<String>> {
-    let mut messages = Vec::<ChatMessage>::new();
-    messages.push(ChatMessage {
-        role: "system".into(),
-        content: r#"You fix invalid JSON from a search planner.
-Return ONLY valid JSON matching: {"use_search": bool, "query": "optional string"}.
-If the planner text implies search is required, set use_search true and craft a short query.
-If no search is needed, return {"use_search": false}."#
-            .into(),
-    });
-
-    messages.push(ChatMessage {
-        role: "user".into(),
-        content: format!(
-            "Planner output:\n\n{}\n\nReturn corrected JSON only.",
-            planner_output
-        ),
-    });
-
-    let llama_req = LlamaChatRequest {
-        model: state.llama_model.clone(),
-        messages,
-        stream: false,
+        "You are a helpful AI assistant. Answer as clearly as possible using only your existing knowledge."
     };
 
-    let url = format!("{}/v1/chat/completions", state.llama_base_url);
-    let client = reqwest::Client::new();
+    messages.push(LlamaMessage {
+        role: "system".into(),
+        content: Some(system_prompt.into()),
+        tool_calls: None,
+        name: None,
+        tool_call_id: None,
+    });
 
-    let resp = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .bearer_auth("no-key")
-        .json(&llama_req)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let llama_resp: LlamaChatResponse = resp.json().await?;
-    let fallback_content = llama_resp
-        .choices
-        .get(0)
-        .and_then(|c| c.content_text())
-        .unwrap_or_default();
-
-    if fallback_content.is_empty() {
-        eprintln!("retry_planner_parse: cleaner returned empty content");
-        return Ok(None);
+    for m in &req.history {
+        messages.push(LlamaMessage {
+            role: m.role.clone(),
+            content: Some(m.content.clone()),
+            tool_calls: None,
+            name: None,
+            tool_call_id: None,
+        });
     }
 
-    match parse_planner_json(&fallback_content) {
-        Ok(result) => Ok(result),
-        Err(_) => {
-            eprintln!(
-                "retry_planner_parse: failed to parse cleaned planner response: {fallback_content}"
-            );
-            if let Some(choice) = llama_resp.choices.get(0) {
-                eprintln!("retry_planner_parse: raw planner choice = {choice:?}");
-            } else {
-                eprintln!("retry_planner_parse: llama response had no choices");
-            }
-            Ok(None)
-        }
-    }
+    messages.push(LlamaMessage {
+        role: "user".into(),
+        content: Some(req.message.clone()),
+        tool_calls: None,
+        name: None,
+        tool_call_id: None,
+    });
+
+    messages
 }
