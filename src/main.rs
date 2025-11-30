@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------- Streaming chat endpoint (fake streaming over full reply) ----------
+// ---------- Streaming chat endpoint (passes through real llama stream) ----------
 
 async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
@@ -325,14 +325,52 @@ struct LlamaChatRequest {
     stream: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct LlamaChatResponse {
     choices: Vec<LlamaChoice>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct LlamaChoice {
-    message: ChatMessage,
+    #[serde(default)]
+    message: Option<ChatMessage>,
+    #[serde(default)]
+    delta: Option<LlamaDelta>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlamaDelta {
+    #[serde(default)]
+    content: String,
+}
+
+impl LlamaChoice {
+    fn content_text(&self) -> Option<String> {
+        if let Some(msg) = &self.message {
+            let trimmed = msg.content.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        if let Some(delta) = &self.delta {
+            let trimmed = delta.content.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        if let Some(text) = &self.text {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Deserialize)]
@@ -402,13 +440,23 @@ Rules:
     let content = llama_resp
         .choices
         .get(0)
-        .map(|c| c.message.content.clone())
+        .and_then(|c| c.content_text())
         .unwrap_or_default();
+
+    if content.is_empty() {
+        eprintln!("plan_search: planner returned empty content; skipping search");
+        return Ok(None);
+    }
 
     match parse_planner_json(&content) {
         Ok(result) => return Ok(result),
         Err(_) => {
             eprintln!("plan_search: failed to parse planner JSON: {content}");
+            if let Some(choice) = llama_resp.choices.get(0) {
+                eprintln!("plan_search: raw planner choice = {choice:?}");
+            } else {
+                eprintln!("plan_search: llama response had no choices");
+            }
         }
     }
 
@@ -521,8 +569,13 @@ If no search is needed, return {"use_search": false}."#
     let fallback_content = llama_resp
         .choices
         .get(0)
-        .map(|c| c.message.content.clone())
+        .and_then(|c| c.content_text())
         .unwrap_or_default();
+
+    if fallback_content.is_empty() {
+        eprintln!("retry_planner_parse: cleaner returned empty content");
+        return Ok(None);
+    }
 
     match parse_planner_json(&fallback_content) {
         Ok(result) => Ok(result),
@@ -530,6 +583,11 @@ If no search is needed, return {"use_search": false}."#
             eprintln!(
                 "retry_planner_parse: failed to parse cleaned planner response: {fallback_content}"
             );
+            if let Some(choice) = llama_resp.choices.get(0) {
+                eprintln!("retry_planner_parse: raw planner choice = {choice:?}");
+            } else {
+                eprintln!("retry_planner_parse: llama response had no choices");
+            }
             Ok(None)
         }
     }
