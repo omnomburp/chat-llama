@@ -424,11 +424,7 @@ async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
         .get(format!("{base_url}/search"))
         .header("X-Forwarded-For", "127.0.0.1")
         .header("Accept", "application/json")
-        .query(&[
-            ("q", query),
-            ("format", "json"),
-            ("language", "en"),
-        ])
+        .query(&[("q", query), ("format", "json"), ("language", "en")])
         .send()
         .await?;
 
@@ -440,7 +436,7 @@ async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
 
     let parsed: SearxngSearchResponse = resp.json().await?;
 
-    let results = parsed
+    let mut results: Vec<SearchResult> = parsed
         .results
         .into_iter()
         .filter_map(|r| {
@@ -456,7 +452,43 @@ async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
         .take(5)
         .collect();
 
+    for res in results.iter_mut().take(2) {
+        if let Some(excerpt) = fetch_page_excerpt(&client, &res.url).await {
+            if res.snippet.is_empty() {
+                res.snippet = excerpt;
+            } else {
+                res.snippet = format!("{} • Page excerpt: {}", res.snippet, excerpt);
+            }
+        }
+    }
+
     Ok(results)
+}
+
+async fn fetch_page_excerpt(client: &reqwest::Client, url: &str) -> Option<String> {
+    use scraper::{Html, Selector};
+
+    let resp = client.get(url).send().await.ok()?;
+    let status = resp.status();
+    if !status.is_success() {
+        return None;
+    }
+
+    let body = resp.text().await.ok()?;
+    let document = Html::parse_document(&body);
+    let body_sel = Selector::parse("body").ok()?;
+    let mut text = String::new();
+    for node in document.select(&body_sel) {
+        text.push_str(&node.text().collect::<String>());
+    }
+
+    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let preview: String = cleaned.chars().take(4000).collect();
+    Some(preview)
 }
 
 fn web_search_tool_definition() -> Tool {
