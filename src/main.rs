@@ -192,7 +192,7 @@ async fn chat_stream_handler(
     let search_enabled = req.use_search;
     let mut messages = build_llama_messages(&req, search_enabled);
     let tools = if search_enabled {
-        Some(vec![duckduckgo_tool_definition()])
+        Some(vec![web_search_tool_definition()])
     } else {
         None
     };
@@ -394,56 +394,77 @@ async fn chat_stream_handler(
     Ok(Sse::new(event_stream).keep_alive(KeepAlive::default()))
 }
 
-async fn duckduckgo_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
-    use scraper::{Html, Selector};
+#[derive(Deserialize)]
+struct SearxngSearchResponse {
+    results: Vec<SearxngResult>,
+}
 
-    // DuckDuckGo's HTML-only search page (no JS)
-    let url = format!(
-        "https://duckduckgo.com/html/?q={}",
-        urlencoding::encode(query)
-    );
+#[derive(Deserialize)]
+struct SearxngResult {
+    title: Option<String>,
+    url: Option<String>,
+    content: Option<String>,
+}
 
-    let resp = reqwest::get(&url).await?.error_for_status()?;
-    let body = resp.text().await?;
-    let document = Html::parse_document(&body);
+async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
+    let base_url =
+        std::env::var("SEARCH_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:4434".into());
+    let base_url = base_url.trim_end_matches('/');
 
-    // Selectors based on DuckDuckGo's HTML structure
-    let result_sel = Selector::parse("div.result").unwrap();
-    let title_sel = Selector::parse("a.result__a").unwrap();
-    let snippet_sel = Selector::parse("a.result__snippet, div.result__snippet").unwrap();
+    let client = reqwest::Client::builder()
+        .user_agent(std::env::var("SEARCH_USER_AGENT").unwrap_or_else(|_| {
+            // pretend to be a normal browser
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                .into()
+        }))
+        .build()?;
 
-    let mut results = Vec::new();
+    let resp = client
+        .get(format!("{base_url}/search"))
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("Accept", "application/json")
+        .query(&[
+            ("q", query),
+            ("format", "json"),
+            ("language", "en"),
+        ])
+        .send()
+        .await?;
 
-    for result in document.select(&result_sel).take(7) {
-        let title_el = result.select(&title_sel).next();
-        let snippet_el = result.select(&snippet_sel).next();
-
-        if let Some(title_el) = title_el {
-            let title = title_el.text().collect::<String>().trim().to_string();
-            let url = title_el.value().attr("href").unwrap_or("").to_string();
-            let snippet = snippet_el
-                .map(|s| s.text().collect::<String>().trim().to_string())
-                .unwrap_or_default();
-
-            if !url.is_empty() {
-                results.push(SearchResult {
-                    title,
-                    snippet,
-                    url,
-                });
-            }
-        }
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("search backend error {}: {}", status, body);
     }
+
+    let parsed: SearxngSearchResponse = resp.json().await?;
+
+    let results = parsed
+        .results
+        .into_iter()
+        .filter_map(|r| {
+            let url = r.url?;
+            let title = r.title.unwrap_or_else(|| url.clone());
+            let snippet = r.content.unwrap_or_default();
+            Some(SearchResult {
+                title,
+                snippet,
+                url,
+            })
+        })
+        .take(5)
+        .collect();
 
     Ok(results)
 }
 
-fn duckduckgo_tool_definition() -> Tool {
+fn web_search_tool_definition() -> Tool {
     Tool {
         tool_type: "function".into(),
         function: ToolFunction {
-            name: "duckduckgo_search".into(),
-            description: "Searches the web using DuckDuckGo and returns the top results.".into(),
+            name: "web_search".into(),
+            description: "Searches the web and returns the top results.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -454,7 +475,7 @@ fn duckduckgo_tool_definition() -> Tool {
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 7,
+                        "maximum": 5,
                         "description": "Optional maximum number of results to return (default 5)"
                     }
                 },
@@ -465,7 +486,7 @@ fn duckduckgo_tool_definition() -> Tool {
 }
 
 #[derive(Deserialize)]
-struct DuckDuckGoToolArgs {
+struct WebSearchToolArgs {
     query: String,
     #[serde(default)]
     max_results: Option<usize>,
@@ -473,14 +494,14 @@ struct DuckDuckGoToolArgs {
 
 async fn handle_tool_call(call: &ToolCall) -> anyhow::Result<(String, Option<Vec<SearchResult>>)> {
     match call.function.name.as_str() {
-        "duckduckgo_search" => {
-            let args: DuckDuckGoToolArgs = serde_json::from_str(&call.function.arguments)
+        "web_search" => {
+            let args: WebSearchToolArgs = serde_json::from_str(&call.function.arguments)
                 .map_err(|e| anyhow::anyhow!("invalid search args: {e}"))?;
             let trimmed_query = args.query.trim();
             if trimmed_query.is_empty() {
                 anyhow::bail!("search query missing");
             }
-            let mut results = duckduckgo_search(trimmed_query).await?;
+            let mut results = web_search(trimmed_query).await?;
             let limit = args.max_results.unwrap_or(5).clamp(1, 7);
             if results.len() > limit {
                 results.truncate(limit);
@@ -522,7 +543,7 @@ fn build_llama_messages(req: &ChatRequest, search_enabled: bool) -> Vec<LlamaMes
     let mut messages = Vec::<LlamaMessage>::new();
 
     let system_prompt = if search_enabled {
-        "You are a helpful AI assistant. You can call the duckduckgo_search tool to fetch recent web information.\n\
+        "You are a helpful AI assistant. You can call the web_search tool to fetch recent web information.\n\
 Use the tool whenever the user asks for factual data you are unsure about.\n\
 When citing information derived from tool results, refer to them as [n] where n is the result index."
     } else {
