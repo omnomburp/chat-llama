@@ -406,25 +406,37 @@ struct SearxngResult {
     content: Option<String>,
 }
 
-async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
-    let base_url =
-        std::env::var("SEARCH_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:4434".into());
-    let base_url = base_url.trim_end_matches('/');
+use reqwest::Client;
 
-    let client = reqwest::Client::builder()
-        .user_agent(std::env::var("SEARCH_USER_AGENT").unwrap_or_else(|_| {
-            // pretend to be a normal browser
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-                .into()
-        }))
+async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
+    let base_url = std::env::var("SEARCH_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4434".into());
+    let base_url = base_url.trim_end_matches('/').to_owned();
+
+    // Client used for SearXNG API
+    let search_client = Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) \
+                     AppleWebKit/537.36 (KHTML, like Gecko) \
+                     Chrome/123.0.0.0 Safari/537.36")
         .build()?;
 
-    let resp = client
+    // Client for scraping result pages — no cookies, no referer
+    let scrape_client = Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) \
+                     AppleWebKit/537.36 (KHTML, like Gecko) \
+                     Chrome/123.0.0.0 Safari/537.36")
+        // We don't add a cookie store, but we ALSO don't set any cookies
+        // (reqwest does not send cookies unless told to).
+        .build()?;
+
+    let resp = search_client
         .get(format!("{base_url}/search"))
-        .header("X-Forwarded-For", "127.0.0.1")
+        .query(&[
+            ("q", query),
+            ("format", "json"),
+            ("language", "en"),
+        ])
         .header("Accept", "application/json")
-        .query(&[("q", query), ("format", "json"), ("language", "en")])
         .send()
         .await?;
 
@@ -443,17 +455,13 @@ async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
             let url = r.url?;
             let title = r.title.unwrap_or_else(|| url.clone());
             let snippet = r.content.unwrap_or_default();
-            Some(SearchResult {
-                title,
-                snippet,
-                url,
-            })
+            Some(SearchResult { title, snippet, url })
         })
         .take(5)
         .collect();
 
     for res in results.iter_mut().take(2) {
-        if let Some(excerpt) = fetch_page_excerpt(&client, &res.url).await {
+        if let Some(excerpt) = fetch_page_excerpt(&scrape_client, &res.url).await {
             if res.snippet.is_empty() {
                 res.snippet = excerpt;
             } else {
@@ -465,18 +473,26 @@ async fn web_search(query: &str) -> anyhow::Result<Vec<SearchResult>> {
     Ok(results)
 }
 
-async fn fetch_page_excerpt(client: &reqwest::Client, url: &str) -> Option<String> {
+async fn fetch_page_excerpt(client: &Client, url: &str) -> Option<String> {
     use scraper::{Html, Selector};
 
-    let resp = client.get(url).send().await.ok()?;
-    let status = resp.status();
-    if !status.is_success() {
+    // Normal GET — reqwest won't send cookies unless explicitly configured
+    let resp = client
+        .get(url)
+        .header("Accept", "text/html,*/*")
+        // IMPORTANT: we intentionally do NOT set Referer
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
         return None;
     }
 
     let body = resp.text().await.ok()?;
     let document = Html::parse_document(&body);
     let body_sel = Selector::parse("body").ok()?;
+
     let mut text = String::new();
     for node in document.select(&body_sel) {
         text.push_str(&node.text().collect::<String>());
@@ -487,9 +503,9 @@ async fn fetch_page_excerpt(client: &reqwest::Client, url: &str) -> Option<Strin
         return None;
     }
 
-    let preview: String = cleaned.chars().take(4000).collect();
-    Some(preview)
+    Some(cleaned.chars().take(4000).collect())
 }
+
 
 fn web_search_tool_definition() -> Tool {
     Tool {
